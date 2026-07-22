@@ -1,0 +1,267 @@
+
+## 容器使用方法（基于本项目训练环境）
+
+### 1. 为什么用容器
+
+```
+容器（Docker Container）的作用:
+  - 环境隔离: 训练代码、依赖、CUDA 版本打包在一起，不受宿主机影响
+  - 可复现: 团队所有人用同一容器，环境完全一致
+  - 便携: 在任何机器上都能跑相同的训练环境
+  - GPU 支持: 容器内直接访问宿主机 GPU
+
+本项目的容器:
+  - 训练代码在容器内 /app/openpi-torch 路径下
+  - pi05 base 模型权重在 /tmp/pi05_base/params/
+  - 数据集在 NFS 共享存储上
+  - checkpoint 产出到 NFS 共享存储
+```
+
+### 2. 容器内的目录结构
+
+```
+容器内路径:
+/app/openpi-torch/                          ← 训练代码根目录
+/app/openpi-torch/.venv/                    ← Python 虚拟环境
+/app/openpi-torch/scripts/                  ← 训练脚本
+  ├── preprocess_lerobot_data_fast.py       ← 阶段1: 前处理
+  ├── merge_lerobot_fast.py                 ← 阶段2: 合并
+  ├── compute_norm_states_fast.py           ← 阶段4: norm 计算
+  └── train.py                               ← 阶段5: 训练
+/app/openpi-torch/src/openpi/training/
+  └── config.py                             ← 阶段3: 编写 config
+
+/tmp/pi05_base/params/                       ← pi05 base 模型权重
+
+/home/appuser/Robot_TF/                     ← 工作目录
+  ├── dataset/lerobot/                       ← 数据集（本地）
+  ├── model/pretrain_model/                  ← 预训练模型/tokenizer
+  │   └── tokenizers                         ← OPENPI_DATA_HOME 指向这里
+  └── model/checkpoints/                     ← checkpoint 产出目录
+
+/home/appuser/NFS_Share/                     ← NFS 共享存储
+  ├── dataset/lerobot/                       ← 数据集（共享）
+  └── model/checkpoints/                     ← checkpoint（共享）
+```
+
+### 3. 进入容器后的初始化流程
+
+**每开新终端都必须执行以下命令**：
+
+```bash
+# 1. 进入训练代码目录
+cd /app/openpi-torch
+
+# 2. 激活 Python 虚拟环境
+source /app/openpi-torch/.venv/bin/activate
+
+# 3. 设置环境变量
+export HF_HUB_OFFLINE=1                          # 禁用 HuggingFace 在线下载（离线模式）
+export HF_DATASETS_OFFLINE=1                     # 禁用数据集在线下载
+export OPENPI_DATA_HOME=/home/appuser/Robot_TF/model/pretrain_model/tokenizers  # tokenizer 路径
+export OPENPI_LOCAL_ASSETS_DIR="/home/appuser/Robot_TF/model/pretrain_model"     # 本地资产目录
+export JAX_PLATFORMS=cuda                        # 使用 CUDA（GPU）
+export XLA_FLAGS=--xla_gpu_cuda_data_dir=./jax_cache  # XLA 缓存目录
+export TMPDIR=./jax_cache/                       # 临时文件目录
+```
+
+**逐行解释**：
+
+| 命令 | 作用 | 不设的后果 |
+|------|------|-----------|
+| `cd /app/openpi-torch` | 进入代码目录 | 找不到训练脚本 |
+| `source .venv/bin/activate` | 激活虚拟环境 | Python 依赖缺失（JAX 等） |
+| `HF_HUB_OFFLINE=1` | 禁止在线下载模型 | 可能卡在网络请求上 |
+| `HF_DATASETS_OFFLINE=1` | 禁止在线下载数据 | 可能卡在网络请求上 |
+| `OPENPI_DATA_HOME=...` | 指定 tokenizer 路径 | 找不到 tokenizer 报错 |
+| `OPENPI_LOCAL_ASSETS_DIR=...` | 指定本地资产目录 | 找不到预训练资产 |
+| `JAX_PLATFORMS=cuda` | 强制使用 GPU | 可能在 CPU 上跑（极慢） |
+| `XLA_FLAGS=...` | XLA 编译缓存 | 每次重新编译，慢 |
+| `TMPDIR=...` | 临时文件目录 | 默认 /tmp 可能空间不够 |
+
+### 4. 容器内执行五阶段流水线
+
+#### 阶段1：数据前处理
+
+```bash
+cd /app/openpi-torch
+source .venv/bin/activate
+# ... 环境变量 ...
+
+# 水管任务（joint 模式，不加 --ee-mode）
+python scripts/preprocess_lerobot_data_fast.py \
+    --src_path /home/appuser/NFS_Share/dataset/lerobot/原始数据集路径 \
+    --output_dir /home/appuser/NFS_Share/dataset/lerobot/输出路径_filted_rby1_XXXs \
+    --fix_outliers \
+    --action_to_next_state
+
+# 主板任务（EE 模式，加 --ee-mode）
+python scripts/preprocess_lerobot_data_fast.py \
+    --src_path /home/appuser/NFS_Share/dataset/lerobot/原始数据集路径 \
+    --output_dir /home/appuser/NFS_Share/dataset/lerobot/输出路径_ee_filted_rby1_XXXs \
+    --fix_outliers \
+    --action_to_next_state \
+    --ee-mode
+```
+
+#### 阶段2：合并数据集
+
+```bash
+python scripts/merge_lerobot_fast.py \
+    --src_paths /path/to/batch1 /path/to/batch2 \
+    --tgt_path /path/to/merged_dataset
+```
+
+#### 阶段3：编写 config
+
+```bash
+# 手动编辑 config.py，新增 TrainConfig 条目
+vi src/openpi/training/config.py
+
+# 或用脚本生成（如本项目的 simulate_config.py）
+python simulate_config.py
+```
+
+#### 阶段4：计算 norm
+
+```bash
+# 水管任务（joint 模式）→ 必须加 --torso 6
+python scripts/compute_norm_states_fast.py \
+    --config-name pi05_rby1_water_hole_insertion_v5_mengfan_742s_from_base_bimodal_rtc_delta_absgripper_260710 \
+    --torso 6
+
+# 主板任务（EE 模式）→ 禁止加 --torso
+python scripts/compute_norm_states_fast.py \
+    --config-name pi05_rby1_cable_connect_mainboard_v4_371s_from_base_ee_delta_euler_260710
+```
+
+#### 阶段5：启动训练
+
+```bash
+# 全新训练（from base）
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 python scripts/train.py \
+    pi05_rby1_water_hole_insertion_v5_mengfan_742s_from_base_bimodal_rtc_delta_absgripper_260710 \
+    --exp-name=0 \
+    --overwrite
+
+# 断点续训（from ckpt 或中断后继续）
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 python scripts/train.py \
+    pi05_rby1_water_hole_insertion_v5_mengfan_742s_from_base_bimodal_rtc_delta_absgripper_260710 \
+    --exp-name=0 \
+    --resume
+```
+
+**参数解释**：
+
+| 参数 | 作用 |
+|------|------|
+| `XLA_PYTHON_CLIENT_MEM_FRACTION=0.9` | 限制 JAX 使用 90% GPU 显存（留 10% 给系统） |
+| `config名` | training_configs.json 中的 name，必须一字不差 |
+| `--exp-name=0` | 实验名，区分不同训练运行 |
+| `--overwrite` | 清空同名实验目录重新开始（首次用） |
+| `--resume` | 从已有 checkpoint 继续训练（中断后用） |
+
+### 5. 容器内监控训练
+
+```bash
+# 查看 loss 日志
+tail -f /home/appuser/NFS_Share/model/checkpoints/config名/0/loss.log
+
+# 查看 checkpoint 产出
+ls /home/appuser/NFS_Share/model/checkpoints/config名/0/
+# 输出: 10000/  20000/  30000/  ...  100000/  loss.log
+
+# 查看 GPU 使用情况
+nvidia-smi
+
+# 查看训练进程
+ps aux | grep train.py
+```
+
+### 6. 容器常用操作
+
+```bash
+# 查看正在运行的容器
+docker ps
+
+# 进入容器（如果已运行）
+docker exec -it <容器名> bash
+
+# 从镜像启动新容器（挂载 GPU 和 NFS）
+docker run -it --gpus all \
+    -v /nfs_share:/home/appuser/NFS_Share \
+    -v /tmp/pi05_base:/tmp/pi05_base \
+    --shm-size=64g \
+    <镜像名> bash
+
+# 退出容器（不停止）
+Ctrl+P, Ctrl+Q    # 或 exit（如果用 exec 进入的）
+
+# 停止容器
+docker stop <容器名>
+
+# 重启容器
+docker start <容器名>
+```
+
+**docker run 参数解释**：
+
+| 参数 | 作用 |
+|------|------|
+| `--gpus all` | 容器内使用所有 GPU |
+| `-v /nfs_share:/home/appuser/NFS_Share` | 挂载 NFS 共享存储 |
+| `-v /tmp/pi05_base:/tmp/pi05_base` | 挂载 base 模型权重 |
+| `--shm-size=64g` | 共享内存大小（FSDP 多卡通信需要） |
+| `-it` | 交互模式 + 分配终端 |
+
+### 7. 常见问题
+
+| 问题 | 原因 | 解决 |
+|------|------|------|
+| `ModuleNotFoundError: No module named 'jax'` | 没激活虚拟环境 | `source .venv/bin/activate` |
+| `CUDA not available` | 没设 `JAX_PLATFORMS=cuda` | `export JAX_PLATFORMS=cuda` |
+| `OOM (显存不足)` | batch_size 太大或显存控制没设 | `XLA_PYTHON_CLIENT_MEM_FRACTION=0.9`，减小 batch_size |
+| `FileNotFoundError: tokenizer` | 没设 `OPENPI_DATA_HOME` | `export OPENPI_DATA_HOME=...` |
+| `Network error` | 没设离线模式 | `export HF_HUB_OFFLINE=1` |
+| `XLA compilation timeout` | XLA 缓存没设 | `export XLA_FLAGS=--xla_gpu_cuda_data_dir=./jax_cache` |
+| 训练中断后想继续 | 用 `--resume` | `python scripts/train.py <config> --exp-name=0 --resume` |
+
+### 8. 完整操作流程（从零开始）
+
+```bash
+# ── 1. 启动/进入容器 ──
+docker exec -it <容器名> bash
+
+# ── 2. 初始化环境（每次开终端都要做）──
+cd /app/openpi-torch
+source .venv/bin/activate
+export HF_HUB_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
+export OPENPI_DATA_HOME=/home/appuser/Robot_TF/model/pretrain_model/tokenizers
+export OPENPI_LOCAL_ASSETS_DIR="/home/appuser/Robot_TF/model/pretrain_model"
+export JAX_PLATFORMS=cuda
+export XLA_FLAGS=--xla_gpu_cuda_data_dir=./jax_cache
+export TMPDIR=./jax_cache/
+
+# ── 3. 五阶段流水线 ──
+# 阶段1: 前处理
+python scripts/preprocess_lerobot_data_fast.py --src_path ... --output_dir ... --fix_outliers --action_to_next_state
+
+# 阶段2: 合并
+python scripts/merge_lerobot_fast.py --src_paths ... --tgt_path ...
+
+# 阶段3: 编写 config（编辑 config.py 或用脚本）
+
+# 阶段4: 计算 norm
+python scripts/compute_norm_states_fast.py --config-name <config名> --torso 6  # joint 模式
+
+# 阶段5: 训练
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 python scripts/train.py <config名> --exp-name=0 --overwrite
+
+# ── 4. 监控训练 ──
+tail -f /home/appuser/NFS_Share/model/checkpoints/<config名>/0/loss.log
+```
+
+### 9. 一句话总结
+
+容器使用流程：`docker exec` 进入容器 → `cd /app/openpi-torch` 进入代码目录 → `source .venv/bin/activate` 激活环境 → 设置 7 个环境变量（离线模式、tokenizer 路径、CUDA、XLA 缓存等）→ 按五阶段依次执行脚本 → `XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 python scripts/train.py <config名> --exp-name=0 --overwrite` 启动训练 → `tail -f loss.log` 监控。每次开新终端都必须重复环境初始化步骤。
