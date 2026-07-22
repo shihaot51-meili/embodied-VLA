@@ -1,0 +1,228 @@
+﻿============================================================
+  pi05 Fine-tuning Pipeline Simulation (PowerShell)
+  Simulating 200-400 demo episodes through full training
+  Tasks: water hose (joint+RTC) + mainboard (EE)
+============================================================
+
+Demo episodes this run: 371
+State dim: 22 (torso 6 + joints 14 + grippers 2)
+
+============================================================
+[Stage 1 - Data Preprocessing]
+  Script: scripts/preprocess_lerobot_data_fast.py
+============================================================
+  Demo episodes: 371
+  Frames per episode: 100
+  State dim: 22 (torso 6 + joints 14 + grippers 2)
+
+  --- Task: water_hose_insertion | Mode: Joint ---
+  Output: C:\Users\shihao9.tian\Desktop\新建文件夹 (4)\mock_processed\lerobot_260710_water_hose_insertion_v5_filted_rby1_371s
+      Processing 37100 frames (simulated)...
+  [OK] Done! total_frames=37100, state_dim=22
+      data/ videos/ meta/ subdirectories created
+
+  --- Task: cable_connect_mainboard | Mode: EE ---
+  Output: C:\Users\shihao9.tian\Desktop\新建文件夹 (4)\mock_processed\lerobot_260710_cable_connect_mainboard_v5_ee_filted_rby1_371s
+      Processing 37100 frames (simulated)...
+  [OK] Done! total_frames=37100, state_dim=16
+      data/ videos/ meta/ subdirectories created
+
+  [Key Points - Stage 1]
+    1. fix_outliers        -> clip outliers to [-3, 3]
+    2. action_to_next_state-> action=next frame state, smooth trajectory
+    3. ee_mode             -> EE space conversion (mainboard), else joint space
+    4. --output_dir required, else modifies raw data irreversibly
+    5. Naming: insert 'filted' or 'ee_filted' before 'rby1'
+
+============================================================
+[Stage 2 - Merge Datasets]
+  Script: scripts/merge_lerobot_fast.py
+============================================================
+  Source 1: lerobot_260710_water_hose_insertion_v5_filted_rby1_371s
+  Source 2: (simulated 2nd batch)
+  Target: C:\Users\shihao9.tian\Desktop\新建文件夹 (4)\mock_merged\lerobot_260710_water_hose_insertion_v5_merged_rby1_742s
+
+  Merged episodes: 742
+  Merged frames: 74200
+  [OK] Verified: 742 == 371 + 371
+
+  [Key Points - Stage 2]
+    1. --tgt_path must not exist beforehand, script creates it
+    2. Verify merged count == sum of subsets
+    3. Can skip if only one batch of data
+
+============================================================
+[Stage 3 - Write Training Config]
+  File: src/openpi/training/config.py -> TrainConfig
+============================================================
+
+  [OK] Water hose config:
+      name: pi05_rby1_water_hole_insertion_v5_mengfan_742s_from_base_bimodal_rtc_delta_absgripper_260710
+      joint+RTC | right arm | action_horizon=30 | steps=100000
+      arm_joint_mask: make_bool_mask(7,-7,1,-1) -> left arm/gripper masked
+      RTC: bimodal, max_delay=8
+
+  [OK] Mainboard config:
+      name: pi05_rby1_cable_connect_mainboard_v4_371s_from_base_ee_delta_euler_260710
+      EE(no RTC) | left arm | action_dim=32 | action_space=ee
+      ee_pose_repr=euler | use_delta_actions=True
+      arm_mode=left -> right arm masked
+
+  Configs saved: C:\Users\shihao9.tian\Desktop\新建文件夹 (4)\training_configs.json
+
+  [Key Points - Stage 3]
+    1. Config name must match --config-name exactly
+    2. Water hose = joint+RTC (right arm); Mainboard = EE (left arm, no RTC)
+    3. assets points to norm: assets_dir/asset_id/norm_stats.json
+    4. from base: 100k steps/save every 10k; from ckpt: 20k steps/save every 1k
+    5. decay_steps = num_train_steps / 2
+    6. Naming: pi05_robot_task_version_Ns_from_source_features_date
+
+============================================================
+[Stage 4 - Compute Norm Statistics]
+  Script: scripts/compute_norm_states_fast.py
+============================================================
+
+  --- water_hose ---
+  config: pi05_rby1_water_hole_insertion_v5_mengfan_742s_from_base_bimodal_rtc_delta_absgripper_260710
+  dataset: lerobot_260710_water_hose_insertion_v5_merged_rby1_742s
+  --torso: 6 (required for joint mode)
+  raw state_dim: 22, effective: 16
+  total frames: 74200
+  [OK] norm_stats.json generated: C:\Users\shihao9.tian\Desktop\新建文件夹 (4)\mock_merged\lerobot_260710_water_hose_insertion_v5_merged_rby1_742s\norm_stats.json
+      state mean[0:3]: 0.1170, -0.1330, 0.1270
+      state std[0:3]:  0.2240, 0.1660, 0.0980
+
+  --- mainboard ---
+  config: pi05_rby1_cable_connect_mainboard_v4_371s_from_base_ee_delta_euler_260710
+  dataset: lerobot_260710_cable_connect_mainboard_v5_ee_filted_rby1_371s
+  --torso: none (forbidden for EE mode)
+  raw state_dim: 16, effective: 16
+  total frames: 37100
+  [OK] norm_stats.json generated: C:\Users\shihao9.tian\Desktop\新建文件夹 (4)\mock_processed\lerobot_260710_cable_connect_mainboard_v5_ee_filted_rby1_371s\norm_stats.json
+      state mean[0:3]: 0.3980, 0.0090, -0.4680
+      state std[0:3]:  0.1670, 0.2390, 0.2610
+
+  [Key Points - Stage 4]
+    1. [WARNING] joint mode (water hose) -> MUST add --torso 6, skip 6 torso dims
+    2. [WARNING] EE mode (mainboard) -> MUST NOT add --torso 6
+    3. Gripper out of range (0~0.1) -> add --correct (modifies data files)
+    4. norm_stats.json stored at assets_dir/asset_id/
+    5. Training and inference MUST use the same norm
+    6. Can skip if reusing old norm, just point assets correctly
+    7. [WARNING] Most error-prone step! Wrong --torso corrupts the model!
+
+============================================================
+[Stage 5 - Launch Training]
+  Script: scripts/train.py
+============================================================
+
+  --- Water Hose Insertion (joint+RTC) ---
+  config:       pi05_rby1_water_hole_insertion_v5_mengfan_742s_from_base_bimodal_rtc_delta_absgripper_260710
+  total steps:  100,000
+  save period:  every 10,000 steps
+  batch_size:   32
+  init weights: /tmp/pi05_base/params/
+  control mode: joint
+  RTC:          True
+  demo data:    371 eps (merged)
+  checkpoint:   C:\Users\shihao9.tian\Desktop\新建文件夹 (4)\mock_checkpoints\pi05_rby1_water_hole_insertion_v5_mengfan_742s_from_base_bimodal_rtc_delta_absgripper_260710\finetune\0
+
+    step       loss            lr
+    ----       ----           ----
+         0    1.998036     2.00E-008
+        50    1.970235     1.02E-006
+       100    1.942352     2.02E-006
+       150    1.920058     3.02E-006
+       200    1.902204     4.02E-006
+       250    1.875953     5.02E-006
+       300    1.852277     6.02E-006
+       350    1.823203     7.02E-006
+       400    1.800781     8.02E-006
+       450    1.768774     9.02E-006
+     10000    0.985375     1.85E-005
+     20000    0.935982     1.41E-005
+    ...
+     60000    0.440605     2.00E-006
+     70000    0.340740     2.00E-006
+     80000    0.237366     2.00E-006
+     90000    0.154894     2.00E-006
+    100000    0.161137     2.00E-006
+
+  Saving 10 checkpoints:
+     step 10000 -> C:\Users\shihao9.tian\Desktop\新建文件夹 (4)\mock_checkpoints\pi05_rby1_water_hole_insertion_v5_mengfan_742s_from_base_bimodal_rtc_delta_absgripper_260710\finetune\0\10000
+     step 20000 -> C:\Users\shihao9.tian\Desktop\新建文件夹 (4)\mock_checkpoints\pi05_rby1_water_hole_insertion_v5_mengfan_742s_from_base_bimodal_rtc_delta_absgripper_260710\finetune\0\20000
+     step 30000 -> C:\Users\shihao9.tian\Desktop\新建文件夹 (4)\mock_checkpoints\pi05_rby1_water_hole_insertion_v5_mengfan_742s_from_base_bimodal_rtc_delta_absgripper_260710\finetune\0\30000
+     step 100000 -> C:\Users\shihao9.tian\Desktop\新建文件夹 (4)\mock_checkpoints\pi05_rby1_water_hole_insertion_v5_mengfan_742s_from_base_bimodal_rtc_delta_absgripper_260710\finetune\0\100000
+     ... (4 intermediate checkpoints)
+
+  [OK] Training complete!
+      loss.log: C:\Users\shihao9.tian\Desktop\新建文件夹 (4)\mock_checkpoints\pi05_rby1_water_hole_insertion_v5_mengfan_742s_from_base_bimodal_rtc_delta_absgripper_260710\finetune\0\loss.log
+      final loss: 0.161137
+      checkpoints: 10
+
+  --- Mainboard Cable (EE, no RTC) ---
+  config:       pi05_rby1_cable_connect_mainboard_v4_371s_from_base_ee_delta_euler_260710
+  total steps:  100,000
+  save period:  every 10,000 steps
+  batch_size:   32
+  init weights: /tmp/pi05_base/params/
+  control mode: ee
+  RTC:          False
+  demo data:    371 eps (single)
+  checkpoint:   C:\Users\shihao9.tian\Desktop\新建文件夹 (4)\mock_checkpoints\pi05_rby1_cable_connect_mainboard_v4_371s_from_base_ee_delta_euler_260710\finetune\0
+
+    step       loss            lr
+    ----       ----           ----
+         0    2.001919     2.00E-008
+        50    1.979209     1.02E-006
+       100    1.944576     2.02E-006
+       150    1.919001     3.02E-006
+       200    1.902701     4.02E-006
+       250    1.875403     5.02E-006
+       300    1.873666     6.02E-006
+       350    1.823780     7.02E-006
+       400    1.800295     8.02E-006
+       450    1.777251     9.02E-006
+     10000    0.990429     1.85E-005
+     20000    0.935691     1.41E-005
+    ...
+     60000    0.459182     2.00E-006
+     70000    0.339632     2.00E-006
+     80000    0.253516     2.00E-006
+     90000    0.180042     2.00E-006
+    100000    0.138002     2.00E-006
+
+  Saving 10 checkpoints:
+     step 10000 -> C:\Users\shihao9.tian\Desktop\新建文件夹 (4)\mock_checkpoints\pi05_rby1_cable_connect_mainboard_v4_371s_from_base_ee_delta_euler_260710\finetune\0\10000
+     step 20000 -> C:\Users\shihao9.tian\Desktop\新建文件夹 (4)\mock_checkpoints\pi05_rby1_cable_connect_mainboard_v4_371s_from_base_ee_delta_euler_260710\finetune\0\20000
+     step 30000 -> C:\Users\shihao9.tian\Desktop\新建文件夹 (4)\mock_checkpoints\pi05_rby1_cable_connect_mainboard_v4_371s_from_base_ee_delta_euler_260710\finetune\0\30000
+     step 100000 -> C:\Users\shihao9.tian\Desktop\新建文件夹 (4)\mock_checkpoints\pi05_rby1_cable_connect_mainboard_v4_371s_from_base_ee_delta_euler_260710\finetune\0\100000
+     ... (4 intermediate checkpoints)
+
+  [OK] Training complete!
+      loss.log: C:\Users\shihao9.tian\Desktop\新建文件夹 (4)\mock_checkpoints\pi05_rby1_cable_connect_mainboard_v4_371s_from_base_ee_delta_euler_260710\finetune\0\loss.log
+      final loss: 0.138002
+      checkpoints: 10
+
+  [Key Points - Stage 5]
+    1. from base: 100k steps/save 10k; from ckpt: 20k steps/save 1k
+    2. --overwrite clears dir; --resume continues from checkpoint
+    3. XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 limits GPU memory
+    4. loss printed every 50 steps, should decrease, no spikes
+    5. checkpoints at checkpoint_base_dir/config_name/exp_name/step/
+    6. fsdp_devices=8 -> 8-GPU FSDP parallel training
+    7. Full command:
+       XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 python scripts/train.py <config> --exp-name=0 --overwrite
+
+============================================================
+  All 5 stages complete!
+============================================================
+
+  Generated artifacts:
+    mock_processed/         Preprocessed datasets
+    mock_merged/            Merged datasets
+    training_configs.json   Training configs for both tasks
+    norm_stats.json         Norm statistics (in dataset dirs)
+    mock_checkpoints/       Training checkpoints + loss.log
+    pipeline_state.json     Pipeline state

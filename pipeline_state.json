@@ -1,0 +1,13 @@
+﻿{
+    "num_episodes":  371,
+    "water_hose_processed":  "C:\\Users\\shihao9.tian\\Desktop\\新建文件夹 (4)\\mock_processed\\lerobot_260710_water_hose_insertion_v5_filted_rby1_371s",
+    "mainboard_processed":  "C:\\Users\\shihao9.tian\\Desktop\\新建文件夹 (4)\\mock_processed\\lerobot_260710_cable_connect_mainboard_v5_ee_filted_rby1_371s",
+    "water_hose_merged":  "C:\\Users\\shihao9.tian\\Desktop\\新建文件夹 (4)\\mock_merged\\lerobot_260710_water_hose_insertion_v5_merged_rby1_742s",
+    "mainboard_merged":  "C:\\Users\\shihao9.tian\\Desktop\\新建文件夹 (4)\\mock_processed\\lerobot_260710_cable_connect_mainboard_v5_ee_filted_rby1_371s",
+    "water_config_name":  "pi05_rby1_water_hole_insertion_v5_mengfan_742s_from_base_bimodal_rtc_delta_absgripper_260710",
+    "mainboard_config_name":  "pi05_rby1_cable_connect_mainboard_v4_371s_from_base_ee_delta_euler_260710",
+    "water_norm_path":  "C:\\Users\\shihao9.tian\\Desktop\\新建文件夹 (4)\\mock_merged\\lerobot_260710_water_hose_insertion_v5_merged_rby1_742s\\norm_stats.json",
+    "mainboard_norm_path":  "C:\\Users\\shihao9.tian\\Desktop\\新建文件夹 (4)\\mock_processed\\lerobot_260710_cable_connect_mainboard_v5_ee_filted_rby1_371s\\norm_stats.json",
+    "water_ckpt_dir":  "C:\\Users\\shihao9.tian\\Desktop\\新建文件夹 (4)\\mock_checkpoints\\pi05_rby1_water_hole_insertion_v5_mengfan_742s_from_base_bimodal_rtc_delta_absgripper_260710\\finetune\\0",
+    "mainboard_ckpt_dir":  "C:\\Users\\shihao9.tian\\Desktop\\新建文件夹 (4)\\mock_checkpoints\\pi05_rby1_cable_connect_mainboard_v4_371s_from_base_ee_delta_euler_260710\\finetune\\0"
+}
